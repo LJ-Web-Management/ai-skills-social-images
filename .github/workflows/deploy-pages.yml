@@ -22,6 +22,8 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
+    outputs:
+      page_url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -37,3 +39,48 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+
+  # Posts images added by this push to Instagram and Facebook, only after the deploy succeeds.
+  # Images are only posted when they are newly added, so manual re-deploys never repost.
+  post-social:
+    needs: deploy
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Find newly added images
+        id: images
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          if [[ "$BEFORE" =~ ^0+$ ]] || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            added="$(git diff-tree --root --no-commit-id --name-only --diff-filter=A -r "$AFTER" -- images/)"
+          else
+            added="$(git diff --name-only --diff-filter=A "$BEFORE" "$AFTER" -- images/)"
+          fi
+          images="$(grep -Ei '\.(jpe?g|png)$' <<<"$added" | tr '\n' ' ' || true)"
+          echo "Newly added images: ${images:-none}"
+          echo "list=${images}" >> "$GITHUB_OUTPUT"
+
+      - name: Post to Instagram and Facebook
+        if: steps.images.outputs.list != ''
+        env:
+          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+          FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
+          PAGES_BASE_URL: ${{ needs.deploy.outputs.page_url }}
+          GRAPH_API_VERSION: ${{ vars.GRAPH_API_VERSION }}
+          DEFAULT_CAPTION: ${{ vars.DEFAULT_CAPTION }}
+          POST_TO_INSTAGRAM: ${{ vars.POST_TO_INSTAGRAM }}
+          POST_TO_FACEBOOK: ${{ vars.POST_TO_FACEBOOK }}
+          IMAGES: ${{ steps.images.outputs.list }}
+        run: |
+          # shellcheck disable=SC2086
+          bash scripts/post-social.sh $IMAGES
