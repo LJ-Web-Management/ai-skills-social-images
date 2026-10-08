@@ -1,0 +1,135 @@
+name: Publish social image
+
+# Deploys GitHub Pages, waits for the new image to be publicly reachable, then publishes it
+# once to Instagram and once to the Facebook Page. Publish state is committed to
+# .github/state/published-images.json with [skip ci]; that path is not a trigger, and pushes
+# made with the automatic GITHUB_TOKEN never start new workflow runs.
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "images/**.jpg"
+      - "images/**.jpeg"
+      - "images/**.png"
+      - "images/**.JPG"
+      - "images/**.JPEG"
+      - "images/**.PNG"
+  workflow_dispatch:
+    inputs:
+      image_path:
+        description: "Image to publish, e.g. images/ai-skills-2026-10-08-give-ai-context-first.jpg (blank = most recently added image)"
+        required: false
+        type: string
+      dry_run:
+        description: "Dry run: deploy and verify the URL only; do not call Meta or write state"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Publish runs one at a time so the state file is never updated concurrently.
+concurrency:
+  group: publish-social-image
+  cancel-in-progress: false
+
+jobs:
+  select:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      images: ${{ steps.pick.outputs.images }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Select image(s)
+        id: pick
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+          INPUT_IMAGE: ${{ inputs.image_path }}
+        run: |
+          set -euo pipefail
+          is_image() { grep -Ei '^images/.+\.(jpe?g|png)$' || true; }
+
+          if [[ "$EVENT" == "workflow_dispatch" ]]; then
+            if [[ -n "$INPUT_IMAGE" ]]; then
+              selected="$INPUT_IMAGE"
+            else
+              selected="$(git log --diff-filter=A --format= --name-only -- images/ | is_image | head -n1)"
+            fi
+          else
+            if [[ "$BEFORE" =~ ^0+$ ]] || ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+              changes="$(git diff-tree --root --no-commit-id --no-renames --name-status -r "$AFTER" -- images/)"
+            else
+              changes="$(git diff --no-renames --name-status "$BEFORE" "$AFTER" -- images/)"
+            fi
+            overwritten="$(awk '$1 == "M" {print $2}' <<<"$changes" | is_image)"
+            if [[ -n "$overwritten" ]]; then
+              echo "::error::Existing image(s) were overwritten; nothing will be published. Use a new dated filename instead: $overwritten"
+              exit 1
+            fi
+            selected="$(awk '$1 == "A" {print $2}' <<<"$changes" | is_image)"
+          fi
+
+          images="$(printf '%s\n' "$selected" | jq -R -s -c 'split("\n") | map(select(length > 0))')"
+          echo "Selected: $images"
+          echo "images=$images" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: select
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    uses: ./.github/workflows/deploy-pages.yml
+
+  publish:
+    needs: [select, deploy]
+    if: needs.select.outputs.images != '[]'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+    permissions:
+      # write is needed only to commit the duplicate-protection state file, via the automatic GITHUB_TOKEN.
+      contents: write
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Configure git for state commits
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Publish to Instagram and Facebook
+        env:
+          META_PAGE_ACCESS_TOKEN: ${{ secrets.META_PAGE_ACCESS_TOKEN }}
+          INSTAGRAM_USER_ID: ${{ secrets.INSTAGRAM_USER_ID }}
+          FACEBOOK_PAGE_ID: ${{ secrets.FACEBOOK_PAGE_ID }}
+          PAGES_BASE_URL: https://lj-web-management.github.io/ai-skills-social-images
+          GRAPH_API_VERSION: ${{ vars.GRAPH_API_VERSION }}
+          IMAGES: ${{ needs.select.outputs.images }}
+          DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}
+        run: |
+          set -euo pipefail
+          flags=()
+          [[ "$DRY_RUN" == "true" ]] && flags+=(--dry-run)
+          mapfile -t images < <(jq -r '.[]' <<<"$IMAGES")
+          for image in "${images[@]}"; do
+            echo "::group::$image"
+            python3 scripts/publish_social.py "$image" "${flags[@]+"${flags[@]}"}"
+            echo "::endgroup::"
+          done

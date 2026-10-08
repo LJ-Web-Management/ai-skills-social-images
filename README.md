@@ -1,129 +1,151 @@
 # ai-skills-social-images
 
-Static asset host for standalone social-media images, served through GitHub Pages.
-This repository contains no website, blog, or pages — only image files.
+Static asset host for daily AI-skill social images, served through GitHub Pages and
+auto-published to Instagram and a Facebook Page. There is no website, blog, or page content here,
+only image files.
 
-## Public image URLs
-
-Every image in `images/` is publicly available at:
-
-```
-https://GITHUB-USERNAME.github.io/ai-skills-social-images/images/FILENAME.jpg
-```
-
-Example:
+## Repository structure
 
 ```
-https://GITHUB-USERNAME.github.io/ai-skills-social-images/images/ai-skills-2026-10-08.jpg
+.github/
+  workflows/
+    deploy-pages.yml           # Deploys the repo to GitHub Pages (also called by the workflow below)
+    publish-social-image.yml   # Deploy → verify image URL → publish to Instagram + Facebook
+  state/
+    published-images.json      # Duplicate-protection record (written by the workflow only)
+images/
+  .gitkeep
+  ai-skills-YYYY-MM-DD-<slug>.jpg
+scripts/
+  publish_social.py            # Meta Graph API publishing + state handling
+.nojekyll
+README.md
 ```
 
-## File naming
+## Image naming
 
-- Store images only in `images/`.
-- Use a unique, dated filename for every image: `ai-skills-YYYY-MM-DD.jpg` (or `.png`).
-- Never overwrite an existing file. If more than one image is needed on the same day,
-  add a suffix: `ai-skills-2026-10-08-2.jpg`.
-- Use lowercase letters, digits, and hyphens only — no spaces.
+- Images go in `images/` only, named `ai-skills-YYYY-MM-DD-<slug>.jpg`, e.g.
+  `images/ai-skills-2026-10-08-give-ai-context-first.jpg`.
+- The slug is lowercase letters, digits, and hyphens. Other names are rejected.
+- **Never overwrite an earlier image.** Always add a new file. If a push modifies an existing
+  image, the workflow fails and publishes nothing.
+- **Use JPEG.** Instagram's publishing API does not accept PNG. A PNG is rejected before anything
+  is posted, so both platforms stay in step.
 
-## Deployment
+## Public URL format
 
-`.github/workflows/deploy-pages.yml` deploys the repository contents to GitHub Pages on
-every push to `main`. `.nojekyll` disables Jekyll processing so files are served as-is.
+```
+https://lj-web-management.github.io/ai-skills-social-images/images/FILENAME.jpg
+```
 
-## Auto-posting to Instagram and Facebook
+## Caption
 
-After every successful Pages deploy triggered by a push, the `post-social` job in the workflow:
+The caption comes from the filename slug. Nothing is added to or changed in the image:
 
-1. finds images **newly added** under `images/` in that push (modified or re-deployed files are never reposted);
-2. waits until each image's public URL returns the real image;
-3. posts it to Instagram (container → wait for `FINISHED` → publish) and to the Facebook Page.
-
-**Captions:** put the caption in a text file with the same name as the image, e.g.
-`images/ai-skills-2026-10-08.txt` next to `images/ai-skills-2026-10-08.jpg`. Commit both in the
-same push. If there is no `.txt` file, the `DEFAULT_CAPTION` variable is used.
-
-**Instagram only accepts JPEG.** A `.png` will still post to Facebook, but the Instagram step fails.
-
-### Where the IDs and tokens go
-
-Never in this repository. Store them as **GitHub Actions secrets**:
-**Settings → Secrets and variables → Actions → Secrets → New repository secret**.
-
-| Secret | What it is |
+| Filename | Caption |
 | --- | --- |
-| `META_ACCESS_TOKEN` | Long-lived **Page** access token for the Facebook Page linked to the Instagram account |
-| `IG_USER_ID` | Instagram professional account ID (numeric) |
-| `FB_PAGE_ID` | Facebook Page ID (numeric) |
+| `ai-skills-2026-10-08-give-ai-context-first.jpg` | `AI skill: Give AI Context First.` |
+| `ai-skills-2026-10-08.jpg` (no slug) | `AI skill for 2026-10-08.` |
 
-Or from a terminal (prompts for the value so it is not saved in shell history):
+`ai`, `api`, `gpt`, `llm`, `seo`, `ui`, `ux` are written in upper case.
+
+## How publishing works
+
+`publish-social-image.yml` runs when a `.jpg`/`.jpeg`/`.png` is pushed under `images/` on `main`,
+or when run manually. It:
+
+1. selects the newly added image(s) in the push;
+2. deploys the repository to GitHub Pages (via `deploy-pages.yml`, Environment `github-pages`);
+3. waits until the exact image URL returns HTTP 200 with `image/jpeg`/`image/png`, without
+   authentication or redirects, and serves the same bytes as the committed file;
+4. creates an Instagram media container, polls it until `FINISHED`, and publishes it once;
+5. posts the same image URL to the Facebook Page as a photo, once;
+6. records the result in `.github/state/published-images.json`.
+
+If any step fails, the workflow run fails. A successful publish is never retried.
+
+## GitHub Environment and secrets
+
+The workflow uses the GitHub Environment named exactly **`github-pages`**. It needs these
+**Environment secrets** (Settings → Environments → `github-pages` → Environment secrets):
+
+| Secret | Value |
+| --- | --- |
+| `META_PAGE_ACCESS_TOKEN` | Long-lived Facebook **Page** access token for the Page linked to the Instagram account |
+| `INSTAGRAM_USER_ID` | Instagram professional (Business/Creator) account ID |
+| `FACEBOOK_PAGE_ID` | Facebook Page ID |
+
+The workflow sends the token to Meta only in an `Authorization` header. It never prints it or
+writes it to files, state, or commits.
+
+**`GITHUB_TOKEN` is automatic.** GitHub creates it for every workflow run. Do **not** create a
+`GITHUB_TOKEN` secret. The workflow uses it only to commit the state file.
+
+Optional repository variable: `GRAPH_API_VERSION` (default `v23.0`).
+
+The token needs these permissions: `pages_show_list`, `pages_read_engagement`, `pages_manage_posts`,
+`instagram_basic`, `instagram_content_publish` (plus `business_management` if the Page is in a
+Business portfolio).
+
+## Running the workflow manually
+
+GitHub → **Actions** → **Publish social image** → **Run workflow** (branch `main`):
+
+- **image_path:** the image to publish, e.g. `images/ai-skills-2026-10-08-give-ai-context-first.jpg`.
+  Leave it blank to use the most recently added image.
+- **dry_run:** tick to deploy and verify the public URL only. It makes no Meta requests and
+  writes no state.
+
+From a terminal:
 
 ```bash
-gh secret set META_ACCESS_TOKEN -R GITHUB-USERNAME/ai-skills-social-images
+gh workflow run publish-social-image.yml -R LJ-Web-Management/ai-skills-social-images -f image_path=images/ai-skills-2026-10-08-give-ai-context-first.jpg -f dry_run=true
 ```
 
-Optional **variables** (same screen, **Variables** tab, not secret):
+A manual run of an image that is already published does nothing and succeeds. Use it to finish
+a run that failed partway, such as Instagram posted but Facebook failed.
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `DEFAULT_CAPTION` | empty | Caption when no `.txt` file exists |
-| `GRAPH_API_VERSION` | `v23.0` | Meta Graph API version |
-| `POST_TO_INSTAGRAM` | `true` | Set `false` to skip Instagram |
-| `POST_TO_FACEBOOK` | `true` | Set `false` to skip Facebook |
+## Verifying the public image URL
 
-### Getting the IDs and token
+```bash
+curl -sI https://lj-web-management.github.io/ai-skills-social-images/images/FILENAME.jpg
+```
 
-1. The Instagram account must be a **Business or Creator** account linked to a Facebook Page.
-2. Create an app at <https://developers.facebook.com/apps> (type: Business) and add the
-   **Instagram Graph API** / Facebook Login products.
-3. In the [Graph API Explorer](https://developers.facebook.com/tools/explorer/), generate a User token with:
-   `pages_show_list`, `pages_read_engagement`, `pages_manage_posts`, `instagram_basic`,
-   `instagram_content_publish` (and `business_management` if the Page is in a Business portfolio).
-4. Exchange it for a long-lived user token, then call `GET /me/accounts` with it. The
-   `access_token` returned for your Page is a long-lived Page token (no expiry) → `META_ACCESS_TOKEN`.
-   The Page's `id` → `FB_PAGE_ID`.
-5. Call `GET /{FB_PAGE_ID}?fields=instagram_business_account`; the returned `id` → `IG_USER_ID`.
-6. For posting from your own accounts the app can stay in Development mode as long as you
-   hold a role on the app; otherwise the permissions need App Review.
+Expect `HTTP/2 200` and `content-type: image/jpeg`, with no redirect. Opening the URL in a
+private browser window should show the image without a login prompt.
+
+## Duplicate protection
+
+`.github/state/published-images.json` records each image's path, SHA-256 hash, commit SHA,
+Instagram media ID, Facebook post ID, and timestamps.
+
+- If an image (by path or identical content) is already recorded as published, the workflow
+  exits successfully without posting.
+- Before each platform's publish call, an `*_attempted_at` marker is committed and pushed.
+  If the call then fails with an unclear result (e.g. network timeout), that platform is
+  **not** retried automatically. The run fails with an "attempted … but its result was never
+  recorded" error. Check the Instagram/Facebook account, then edit the state file by hand:
+  add the real `instagram_media_id`/`facebook_post_id` if it did post, or delete the
+  `*_attempted_at` line if it did not. Then run the workflow again.
+- If Meta clearly rejects a request (HTTP 4xx), the marker is removed again, so a re-run can retry.
+- State commits use `[skip ci]`. `.github/state/` is not a trigger path, and pushes made with
+  `GITHUB_TOKEN` do not start new workflow runs.
+- Runs are serialized (`concurrency: publish-social-image`). Push one new image per commit and
+  wait for the run to finish before pushing the next. If a queued run is ever cancelled, publish
+  that image with a manual run.
+
+## Getting images into the repository
+
+> **Warning:** the local Codex image generator still needs an authorized way to push the
+> generated image into this repository, such as a logged-in `gh`/git credential helper on that
+> machine, an SSH deploy key with write access, or a fine-grained GitHub token stored in the
+> operating system's credential store. **Never** put tokens in the generator's prompt, memory
+> file, source code, or image files, and never commit them to this repository.
+
+After the push, the workflow handles deployment and publishing. The generator should only add
+a new, uniquely named JPEG under `images/` and push it to `main`.
 
 ## Security
 
-Do not commit Instagram or Facebook access tokens, API keys, passwords, or any other secrets
-to this repository. It is public. Credentials live only in GitHub Actions secrets, which are
-encrypted, masked in logs, and not readable by people viewing the repository.
-
-## Validation checklist
-
-Run these checks after setup and whenever something looks wrong.
-
-1. **Repository is public**
-
-   ```bash
-   gh repo view GITHUB-USERNAME/ai-skills-social-images --json visibility -q .visibility
-   ```
-
-   Expected output: `PUBLIC`
-
-2. **GitHub Pages URL opens without authentication** — open it in a private/incognito
-   browser window, or:
-
-   ```bash
-   curl -sI https://GITHUB-USERNAME.github.io/ai-skills-social-images/images/.gitkeep
-   ```
-
-   Expected: `HTTP/2 200` with no login redirect.
-
-3. **Image URL returns the actual image file**
-
-   ```bash
-   curl -sI https://GITHUB-USERNAME.github.io/ai-skills-social-images/images/FILENAME.jpg
-   ```
-
-   Expected: `HTTP/2 200` and `content-type: image/jpeg` (or `image/png`) — not `text/html`.
-
-4. **Each daily image uses a new filename** — confirm no existing file was modified:
-
-   ```bash
-   git log --diff-filter=M --name-only --format= -- images/
-   ```
-
-   Expected: no output (images are only ever added, never modified).
+This repository is public. It must never contain access tokens, API keys, passwords, or other
+secrets. Credentials live only in the `github-pages` Environment secrets.
