@@ -22,7 +22,7 @@ on:
         required: false
         type: string
       dry_run:
-        description: "Dry run: deploy and verify the URL only; do not call Meta or write state"
+        description: "Dry run: deploy, verify the URL and run read-only Meta checks; never publishes or writes state"
         required: false
         type: boolean
         default: false

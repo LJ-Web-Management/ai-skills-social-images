@@ -58,9 +58,35 @@ or when run manually. It:
 2. deploys the repository to GitHub Pages (via `deploy-pages.yml`, Environment `github-pages`);
 3. waits until the exact image URL returns HTTP 200 with `image/jpeg`/`image/png`, without
    authentication or redirects, and serves the same bytes as the committed file;
-4. creates an Instagram media container, polls it until `FINISHED`, and publishes it once;
-5. posts the same image URL to the Facebook Page as a photo, once;
-6. records the result in `.github/state/published-images.json`.
+4. resolves a Facebook **Page** access token for `FACEBOOK_PAGE_ID` (before anything is posted,
+   so a token problem stops the run before Instagram publishes);
+5. creates an Instagram media container, polls it until `FINISHED`, publishes it once, then reads
+   `GET /{media-id}?fields=permalink` and stores it as `instagram_permalink`;
+6. posts the same image URL to the Facebook Page once, using the Page Photos endpoint (below);
+7. records the result in `.github/state/published-images.json`.
+
+Logs show only IDs, URLs, and statuses. Access tokens are never printed.
+
+### Facebook publishing method
+
+Facebook posts use the Graph API **Page Photos** endpoint with a **Page access token**:
+
+```
+POST https://graph.facebook.com/v23.0/{FACEBOOK_PAGE_ID}/photos
+  url=<public GitHub Pages image URL>
+  message=<caption>
+  published=true
+Authorization: Bearer <Page access token>
+```
+
+The response's `post_id` is stored as `facebook_post_id`. The `/feed` endpoint is not used, and
+no deprecated permissions are used or needed.
+
+If Facebook returns an `(#200)` error saying a permission "is not available" or "has been
+deprecated", the photo was posted with a **User** token instead of a Page token. The workflow prevents this automatically.
+It calls `GET /me`: if the secret is already the Page's token, it is used as-is. Otherwise it
+calls `GET /{FACEBOOK_PAGE_ID}?fields=access_token` to get the Page token and uses that for
+the post. If no Page token can be obtained, the run fails before anything is published.
 
 If any step fails, the workflow run fails. A successful publish is never retried.
 
@@ -71,7 +97,7 @@ The workflow uses the GitHub Environment named exactly **`github-pages`**. It ne
 
 | Secret | Value |
 | --- | --- |
-| `META_PAGE_ACCESS_TOKEN` | Long-lived Facebook **Page** access token for the Page linked to the Instagram account |
+| `META_PAGE_ACCESS_TOKEN` | Long-lived Facebook **Page** access token for the Page linked to the Instagram account (a long-lived User token of a Page admin also works; the Page token is derived from it at run time) |
 | `INSTAGRAM_USER_ID` | Instagram professional (Business/Creator) account ID |
 | `FACEBOOK_PAGE_ID` | Facebook Page ID |
 
@@ -83,9 +109,18 @@ writes it to files, state, or commits.
 
 Optional repository variable: `GRAPH_API_VERSION` (default `v23.0`).
 
-The token needs these permissions: `pages_show_list`, `pages_read_engagement`, `pages_manage_posts`,
-`instagram_basic`, `instagram_content_publish` (plus `business_management` if the Page is in a
-Business portfolio).
+Required token permissions:
+
+| Permission | Used for |
+| --- | --- |
+| `pages_show_list` | Finding the Page and its Page token |
+| `pages_read_engagement` | Reading the Page and its token |
+| `pages_manage_posts` | `POST /{page-id}/photos` |
+| `instagram_basic` | Reading the Instagram media permalink |
+| `instagram_content_publish` | Instagram container and `media_publish` |
+| `business_management` | Only if the Page is owned by a Business portfolio |
+
+No other permissions are needed. Deprecated user-posting permissions are not used and must not be requested.
 
 ## Running the workflow manually
 
@@ -93,8 +128,8 @@ GitHub → **Actions** → **Publish social image** → **Run workflow** (branch
 
 - **image_path:** the image to publish, e.g. `images/ai-skills-2026-10-08-give-ai-context-first.jpg`.
   Leave it blank to use the most recently added image.
-- **dry_run:** tick to deploy and verify the public URL only. It makes no Meta requests and
-  writes no state.
+- **dry_run:** tick to deploy, verify the public URL, and run read-only Meta checks: Page
+  token lookup and Instagram permalink lookup. It never publishes and never writes state.
 
 From a terminal:
 
@@ -117,7 +152,11 @@ private browser window should show the image without a login prompt.
 ## Duplicate protection
 
 `.github/state/published-images.json` records each image's path, SHA-256 hash, commit SHA,
-Instagram media ID, Facebook post ID, and timestamps.
+`instagram_media_id`, `instagram_permalink`, `facebook_post_id`, and timestamps.
+
+- If Instagram succeeded but Facebook failed, a re-run publishes **only** to Facebook. A recorded
+  `instagram_media_id` is never published again. If the permalink is missing, it is filled in
+  with a read-only lookup.
 
 - If an image (by path or identical content) is already recorded as published, the workflow
   exits successfully without posting.

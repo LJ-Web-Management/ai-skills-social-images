@@ -3,8 +3,12 @@
 
 Usage: publish_social.py IMAGE_PATH [--dry-run]
 
+--dry-run verifies the public URL and makes only read-only Meta requests (Page token lookup,
+Instagram permalink); it never publishes and never writes state.
+
 Environment (secrets come from the github-pages GitHub Environment, never from files):
-  META_PAGE_ACCESS_TOKEN  Facebook Page access token
+  META_PAGE_ACCESS_TOKEN  Facebook Page access token, or a User token that manages the Page
+                          (a Page token is then requested for FACEBOOK_PAGE_ID)
   INSTAGRAM_USER_ID       Instagram professional account ID
   FACEBOOK_PAGE_ID        Facebook Page ID
   PAGES_BASE_URL          default https://lj-web-management.github.io/ai-skills-social-images
@@ -61,9 +65,15 @@ class MetaError(Failure):
         self.definite = definite
 
 
+# Every token in use (the secret plus any Page token derived from it) is redacted from messages.
+SECRETS = {TOKEN} if TOKEN else set()
+
+
 def redact(text):
     text = str(text)
-    return text.replace(TOKEN, "***") if TOKEN else text
+    for secret in SECRETS:
+        text = text.replace(secret, "***")
+    return text
 
 
 def now():
@@ -79,7 +89,7 @@ def caption_for(date, slug):
 
 # ---------- Meta Graph API ----------
 
-def graph(method, path, params):
+def graph(method, path, params, token=None):
     url = f"{GRAPH}/{path}"
     data = None
     if method == "GET":
@@ -87,7 +97,9 @@ def graph(method, path, params):
     else:
         data = urllib.parse.urlencode(params).encode()
     # Token goes in a header so it never appears in URLs, request bodies, or error text.
-    req = urllib.request.Request(url, data=data, method=method, headers={"Authorization": f"Bearer {TOKEN}"})
+    req = urllib.request.Request(
+        url, data=data, method=method, headers={"Authorization": f"Bearer {token or TOKEN}"}
+    )
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
             return json.loads(resp.read())
@@ -127,8 +139,45 @@ def instagram_publish(ig_user, container):
     return media_id
 
 
-def facebook_publish(page_id, image_url, caption):
-    resp = graph("POST", f"{page_id}/photos", {"url": image_url, "message": caption, "published": "true"})
+def instagram_permalink(media_id):
+    """Read-only lookup; failure is logged but never blocks or repeats a publish."""
+    try:
+        return graph("GET", media_id, {"fields": "permalink"}).get("permalink")
+    except MetaError as e:
+        print(f"::warning::Could not read Instagram permalink for media {media_id}: {e}")
+        return None
+
+
+def facebook_page_token(page_id):
+    """Returns a Page access token for page_id.
+
+    Posting to /{page_id}/photos with a User token makes Meta treat it as a post by the user,
+    which Meta rejects with a deprecated-permission error (#200). So the post must be made
+    with a Page token: use the secret as-is if it already is one, otherwise exchange it.
+    """
+    help_text = ("The token owner must manage the Page and the token needs pages_manage_posts, "
+                 "pages_read_engagement and pages_show_list. Nothing was published.")
+    try:
+        me = graph("GET", "me", {"fields": "id"}).get("id")
+        if me == page_id:
+            print(f"Facebook token: Page token for Page {page_id} (from secret).")
+            return TOKEN
+        print(f"Facebook token: secret is not a Page token (it belongs to id {me}); "
+              f"requesting the Page token for Page {page_id}.")
+        page_token = graph("GET", page_id, {"fields": "access_token"}).get("access_token")
+    except MetaError as e:
+        raise Failure(f"Could not get a Page access token for Page {page_id}: {e}. {help_text}")
+    if not page_token:
+        raise Failure(f"Could not get a Page access token for Page {page_id}. {help_text}")
+    SECRETS.add(page_token)
+    print(f"Facebook token: Page token obtained for Page {page_id}.")
+    return page_token
+
+
+def facebook_publish(page_id, page_token, image_url, caption):
+    # Page Photos endpoint (not /feed): POST /{page-id}/photos with url + message.
+    resp = graph("POST", f"{page_id}/photos",
+                 {"url": image_url, "message": caption, "published": "true"}, token=page_token)
     post_id = resp.get("post_id") or resp.get("id")
     if not post_id:
         raise MetaError("Facebook response had no post id.", definite=False)
@@ -245,23 +294,43 @@ def publish(path, dry_run):
     if need_ig and ext == "png":
         raise Failure("Instagram publishing only accepts JPEG. Save the image as .jpg; nothing was published.")
 
-    wait_for_image(image_url, sha256, CONTENT_TYPES[ext])
+    if not need_ig:
+        print(f"Instagram: already published (media id {entry['instagram_media_id']}); will not publish again.")
+    if not need_fb:
+        print(f"Facebook: already published (post id {entry['facebook_post_id']}); will not publish again.")
 
-    if dry_run:
-        print(f"DRY RUN: would publish to {'Instagram ' if need_ig else ''}{'Facebook' if need_fb else ''}. "
-              "No Meta requests made, no state written.")
-        return
+    wait_for_image(image_url, sha256, CONTENT_TYPES[ext])
 
     missing = [n for n in ("META_PAGE_ACCESS_TOKEN", "INSTAGRAM_USER_ID", "FACEBOOK_PAGE_ID") if not os.environ.get(n)]
     if missing:
+        if dry_run:
+            print(f"DRY RUN: secrets not available ({', '.join(missing)}); skipping read-only Meta checks.")
+            return
         raise Failure(f"Missing github-pages Environment secret(s): {', '.join(missing)}")
     ig_user, page_id = os.environ["INSTAGRAM_USER_ID"], os.environ["FACEBOOK_PAGE_ID"]
+
+    # Resolve the Facebook Page token before anything is published, so a token problem
+    # fails the run before Instagram posts rather than leaving Facebook behind.
+    page_token = facebook_page_token(page_id) if need_fb else None
+
+    if dry_run:
+        if not need_ig and not entry.get("instagram_permalink"):
+            print(f"DRY RUN: Instagram permalink would be stored: {instagram_permalink(entry['instagram_media_id'])}")
+        print(f"DRY RUN: would publish to {' and '.join(p for p, n in (('Instagram', need_ig), ('Facebook', need_fb)) if n)}. "
+              "Only read-only Meta requests were made; no state written.")
+        return
 
     if not entry:
         entry = {"path": path, "sha256": sha256,
                  "commit": git("log", "-1", "--diff-filter=A", "--format=%H", "--", path),
                  "image_url": image_url, "caption": caption}
         state["images"].append(entry)
+
+    if not need_ig and not entry.get("instagram_permalink"):
+        permalink = instagram_permalink(entry["instagram_media_id"])
+        if permalink:
+            entry["instagram_permalink"] = permalink
+            print(f"Instagram permalink: {permalink}")
 
     if need_ig:
         container = instagram_create_container(ig_user, image_url, caption)
@@ -277,12 +346,16 @@ def publish(path, dry_run):
         entry["instagram_media_id"] = media_id
         entry["instagram_published_at"] = now()
         print(f"Instagram published: media id {media_id}")
+        permalink = instagram_permalink(media_id)
+        if permalink:
+            entry["instagram_permalink"] = permalink
+            print(f"Instagram permalink: {permalink}")
 
     if need_fb:
         entry["facebook_attempted_at"] = now()
         save_state(state, f"Start Facebook publish of {path}")
         try:
-            post_id = facebook_publish(page_id, image_url, caption)
+            post_id = facebook_publish(page_id, page_token, image_url, caption)
         except MetaError as e:
             if e.definite:
                 del entry["facebook_attempted_at"]
