@@ -1,3 +1,12 @@
 {
-  "images": []
+  "images": [
+    {
+      "path": "images/ai-skills-2026-10-08-check-ai-assumptions.jpg",
+      "sha256": "f2aecccb5a0f795e139ab472e640e0b31a69c2b6047268e50ce4a9f013c35d10",
+      "commit": "2297389a5bda5ef0875c89302013f1d9d674bd25",
+      "image_url": "https://lj-web-management.github.io/ai-skills-social-images/images/ai-skills-2026-10-08-check-ai-assumptions.jpg",
+      "caption": "AI skill: Check AI Assumptions.",
+      "instagram_attempted_at": "2026-10-09T00:36:27Z"
+    }
+  ]
 }
